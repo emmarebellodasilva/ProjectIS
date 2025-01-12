@@ -10,74 +10,107 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 from xgboost import XGBClassifier
 from sklearn.svm import LinearSVC
-from sklearn.preprocessing import LabelEncoder
 from sklearn.neural_network import MLPClassifier
+import skfuzzy as fuzz
+import numpy as np
+from sklearn.base import BaseEstimator, TransformerMixin
 
-#Text Cleaning Function
+# Text Cleaning Function
 def clean_text(text):
     text = text.lower()  # Convert to lowercase
     text = re.sub(r'<.*?>', '', text)  # Remove HTML tags
     text = re.sub(r'[^\w\s]', '', text)  # Remove punctuation
     return text
 
-#Load and Clean Dataset
+# Load and Clean Dataset
 df = pd.read_csv("/Users/emmarebellodasilva/Desktop/ProjectSI/IMDB Dataset.csv")
 df['review'] = df['review'].apply(clean_text)
 
-#Handle Data Imbalance (Downsample the majority class)
+# Handle Data Imbalance (Downsample the majority class)
 positive = df[df['sentiment'] == 'positive']
 negative = df[df['sentiment'] == 'negative']
 
-#Equalize classes
+# Equalize classes
 positive_downsampled = resample(positive, replace=False, n_samples=len(negative), random_state=42)
 balanced_df = pd.concat([positive_downsampled, negative])
 
-#Encode Sentiment Labels (Binary Encoding)
+# Encode Sentiment Labels (Binary Encoding)
 balanced_df['sentiment'] = balanced_df['sentiment'].map({'positive': 1, 'negative': 0})
 
-#Prepare Features and Labels
+# Prepare Features and Labels
 X = balanced_df['review']
 y = balanced_df['sentiment']
 
-#Split Dataset
+# Split Dataset
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
 
-#METHODOLOGY
-#Define Improved Pipelines
+# Define Improved Pipelines
 models = {
-    #logistic reression 
     'Logistic Regression': Pipeline([
         ('tfidf', TfidfVectorizer(max_features=10000, ngram_range=(1, 2))),
         ('clf', LogisticRegression(max_iter=300, random_state=42))
     ]),
-    #decision tree
     'Decision Tree': Pipeline([
         ('tfidf', TfidfVectorizer(max_features=10000)),
         ('clf', DecisionTreeClassifier(max_depth=10, random_state=42))
     ]),
-    #random forest
     'Random Forest': Pipeline([
         ('tfidf', TfidfVectorizer(max_features=10000)),
         ('clf', RandomForestClassifier(n_estimators=200, max_depth=15, random_state=42))
     ]),
-    #xgboost
     'XGBoost': Pipeline([
         ('tfidf', TfidfVectorizer(max_features=10000)),
         ('clf', XGBClassifier(use_label_encoder=False, eval_metric='logloss', n_estimators=150, max_depth=10, random_state=42))
     ]),
-    #support vector machine 
     'SVM': Pipeline([
         ('tfidf', TfidfVectorizer(max_features=10000, ngram_range=(1, 2))),
         ('clf', LinearSVC(random_state=42))
     ]),
-    #deep neural network
     'Deep Neural Network': Pipeline([
         ('tfidf', TfidfVectorizer(max_features=10000)),
         ('clf', MLPClassifier(hidden_layer_sizes=(128, 64), activation='relu', max_iter=300, random_state=42))
     ])
 }
 
-#Train and Evaluate Each Model
+# Custom Fuzzy Logic Transformer for Pipeline
+class FuzzyLogicTransformer(BaseEstimator, TransformerMixin):
+    def fit(self, X, y=None):
+        # No fitting required for this transformer
+        return self
+    
+    def transform(self, X):
+        # Define fuzzy variables for sentiment scores
+        sentiment_range = np.linspace(0, 1, 100)
+        
+        # Prepare the transformed features (TF-IDF scores)
+        tfidf_scores = TfidfVectorizer(max_features=10000, ngram_range=(1, 2)).fit_transform(X).toarray()
+        
+        # Apply fuzzy logic to each review's average TF-IDF score
+        fuzzy_scores = np.array([self.fuzzy_sentiment_score(np.mean(scores)) for scores in tfidf_scores])
+        
+        return fuzzy_scores.reshape(-1, 1)  # Ensure it returns a 2D array
+
+    def fuzzy_sentiment_score(self, tfidf_scores):
+        # Membership functions for positive and negative sentiment
+        sentiment_range = np.linspace(0, 1, 100)
+        positive = fuzz.trapmf(sentiment_range, [0.5, 1, 1, 1])  # If score > 0.5, it's positive
+        negative = fuzz.trapmf(sentiment_range, [0, 0, 0.5, 1])  # If score < 0.5, it's negative
+        
+        # Evaluate fuzzy membership for the TF-IDF scores
+        positive_degree = fuzz.interp_membership(sentiment_range, positive, tfidf_scores)
+        negative_degree = fuzz.interp_membership(sentiment_range, negative, tfidf_scores)
+        
+        # The final sentiment score is determined by the maximum membership
+        sentiment_score = 1 if positive_degree > negative_degree else 0
+        return sentiment_score
+
+# Fuzzy Inference Model with Classifier for Final Prediction
+fuzzy_model = Pipeline([
+    ('fuzzy', FuzzyLogicTransformer()),
+    ('clf', LogisticRegression(max_iter=300, random_state=42))  # Final classifier for prediction
+])
+
+# Train and Evaluate Each Model
 results = {}
 for name, pipeline in models.items():
     print(f"Training {name}...")
@@ -90,42 +123,58 @@ for name, pipeline in models.items():
     print(f"Accuracy: {accuracy:.4f}\n")
     print(report)
 
-#Summary of Results
+# Train and Evaluate Fuzzy Logic Model
+print(f"Training Fuzzy Logic Model...")
+fuzzy_model.fit(X_train, y_train)
+fuzzy_predictions = fuzzy_model.predict(X_test)
+fuzzy_accuracy = accuracy_score(y_test, fuzzy_predictions)
+fuzzy_report = classification_report(y_test, fuzzy_predictions, target_names=['Negative', 'Positive'])
+results['Fuzzy Logic'] = {'accuracy': fuzzy_accuracy, 'report': fuzzy_report}
+
+print(f"\nFuzzy Logic Results:\n")
+print(f"Accuracy: {fuzzy_accuracy:.4f}\n")
+print(fuzzy_report)
+
+# Summary of Results
 print("\nSummary of Model Results:\n")
 for name, result in results.items():
     print(f"{name}: Accuracy = {result['accuracy']:.4f}\n")
+# Count unique words for positive and negative reviews
+positive_vocab = set(" ".join(df[df['sentiment'] == 'positive']['review']).split())
+negative_vocab = set(" ".join(df[df['sentiment'] == 'negative']['review']).split())
 
-import matplotlib.pyplot as plt
-import seaborn as sns
-import pandas as pd
-from sklearn.metrics import confusion_matrix
+print("Number of Unique Words in Positive Reviews:", len(positive_vocab))
+print("Number of Unique Words in Negative Reviews:", len(negative_vocab))
 
-# Load the testing dataset
-test_df = pd.read_csv("test_IMDB_dataset.csv")
+# Find overlap in vocabulary
+common_vocab = positive_vocab.intersection(negative_vocab)
+print("Number of Common Words Between Sentiments:", len(common_vocab))
 
-# Convert sentiment labels from 'negative'/'positive' to 0/1
-test_df['sentiment'] = test_df['sentiment'].map({'negative': 0, 'positive': 1})
+from collections import Counter
 
-# Evaluate the model on the testing data
-predictions = pipeline.predict(test_df['review'])
+# Get the most common words for positive reviews
+positive_words = " ".join(df[df['sentiment'] == 'positive']['review']).split()
+common_positive_words = Counter(positive_words).most_common(10)
+print("Most Common Words in Positive Reviews:")
+print(common_positive_words)
 
-# Check the length of 'sentiment' and 'predictions' to ensure they match
-print(f"Length of test_df['sentiment']: {len(test_df['sentiment'])}")
-print(f"Length of predictions: {len(predictions)}")
+# Get the most common words for negative reviews
+negative_words = " ".join(df[df['sentiment'] == 'negative']['review']).split()
+common_negative_words = Counter(negative_words).most_common(10)
+print("\nMost Common Words in Negative Reviews:")
+print(common_negative_words)
 
-# Ensure that the lengths of true labels and predictions match
-if len(test_df['sentiment']) != len(predictions):
-    raise ValueError(f"Length mismatch: 'sentiment' has {len(test_df['sentiment'])} elements, but predictions has {len(predictions)} elements.")
+import string
 
-# Generate the confusion matrix
-cm = confusion_matrix(test_df['sentiment'], predictions)
+# Count punctuation marks
+df['punctuation_count'] = df['review'].apply(lambda x: sum([1 for char in x if char in string.punctuation]))
 
-# Plot the confusion matrix
+# Plot the distribution of punctuation count
 plt.figure(figsize=(8, 6))
-sns.heatmap(cm, annot=True, cmap='Blues', fmt='g', xticklabels=['Negative', 'Positive'], yticklabels=['Negative', 'Positive'])
-plt.xlabel('Predicted')
-plt.ylabel('True')
-plt.title('Confusion Matrix')
+sns.histplot(df['punctuation_count'], bins=30, kde=True, color='purple')
+plt.title("Distribution of Punctuation in Reviews")
+plt.xlabel("Number of Punctuation Marks")
+plt.ylabel("Frequency")
 plt.show()
 
 #DATA CARACTERISATION 
@@ -214,104 +263,54 @@ plt.ylabel("Average Number of Words")
 plt.xticks(rotation=0)
 plt.show()
 
-# Check for class imbalance
-class_counts = df['sentiment'].value_counts()
-print("Class Distribution:")
-print(class_counts)
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+from sklearn.metrics import confusion_matrix
 
-# Visualize class imbalance
-plt.figure(figsize=(6, 4))
-class_counts.plot(kind='pie', autopct='%1.1f%%', startangle=90, colors=['lightcoral', 'lightblue'])
-plt.title("Class Imbalance")
-plt.ylabel('')
-plt.show()
+# Load the testing dataset
+test_df = pd.read_csv("test_IMDB_dataset.csv")
 
-import string
+# Convert sentiment labels from 'negative'/'positive' to 0/1
+test_df['sentiment'] = test_df['sentiment'].map({'negative': 0, 'positive': 1})
 
-# Count punctuation marks
-df['punctuation_count'] = df['review'].apply(lambda x: sum([1 for char in x if char in string.punctuation]))
+# Evaluate the model on the testing data
+predictions = pipeline.predict(test_df['review'])
 
-# Plot the distribution of punctuation count
+# Check the length of 'sentiment' and 'predictions' to ensure they match
+print(f"Length of test_df['sentiment']: {len(test_df['sentiment'])}")
+print(f"Length of predictions: {len(predictions)}")
+
+# Ensure that the lengths of true labels and predictions match
+if len(test_df['sentiment']) != len(predictions):
+    raise ValueError(f"Length mismatch: 'sentiment' has {len(test_df['sentiment'])} elements, but predictions has {len(predictions)} elements.")
+
+# Generate the confusion matrix
+cm = confusion_matrix(test_df['sentiment'], predictions)
+
+# Plot the confusion matrix
 plt.figure(figsize=(8, 6))
-sns.histplot(df['punctuation_count'], bins=30, kde=True, color='purple')
-plt.title("Distribution of Punctuation in Reviews")
-plt.xlabel("Number of Punctuation Marks")
-plt.ylabel("Frequency")
+sns.heatmap(cm, annot=True, cmap='Blues', fmt='g', xticklabels=['Negative', 'Positive'], yticklabels=['Negative', 'Positive'])
+plt.xlabel('Predicted')
+plt.ylabel('True')
+plt.title('Confusion Matrix')
 plt.show()
 
-from collections import Counter
+from sklearn.metrics import accuracy_score
 
-# Get the most common words for positive reviews
-positive_words = " ".join(df[df['sentiment'] == 'positive']['review']).split()
-common_positive_words = Counter(positive_words).most_common(10)
-print("Most Common Words in Positive Reviews:")
-print(common_positive_words)
+# Evaluate the model with best hyperparameters on the testing data
+predictions_after_tuning = final_model.predict(test_df['review'])
 
-# Get the most common words for negative reviews
-negative_words = " ".join(df[df['sentiment'] == 'negative']['review']).split()
-common_negative_words = Counter(negative_words).most_common(10)
-print("\nMost Common Words in Negative Reviews:")
-print(common_negative_words)
+# Calculate accuracy after tuning
+accuracy_after_tuning = accuracy_score(test_df['sentiment'], predictions_after_tuning)
 
-# Count unique words for positive and negative reviews
-positive_vocab = set(" ".join(df[df['sentiment'] == 'positive']['review']).split())
-negative_vocab = set(" ".join(df[df['sentiment'] == 'negative']['review']).split())
+# Calculate accuracy before tuning (if necessary)
+predictions_before_tuning = pipeline.predict(test_df['review'])
+accuracy_before_tuning = accuracy_score(test_df['sentiment'], predictions_before_tuning)
 
-print("Number of Unique Words in Positive Reviews:", len(positive_vocab))
-print("Number of Unique Words in Negative Reviews:", len(negative_vocab))
+# Print improvement in accuracy
+print("Accuracy before tuning:", accuracy_before_tuning)
+print("Accuracy after tuning:", accuracy_after_tuning)
+print("Improvement in accuracy:", accuracy_after_tuning - accuracy_before_tuning)
 
-# Find overlap in vocabulary
-common_vocab = positive_vocab.intersection(negative_vocab)
-print("Number of Common Words Between Sentiments:", len(common_vocab))
-
-# Calculate average word length
-df['avg_word_length'] = df['review'].apply(lambda x: sum(len(word) for word in x.split()) / len(x.split()))
-
-# Average review length by sentiment
-avg_word_length_by_sentiment = df.groupby('sentiment')['avg_word_length'].mean()
-print("Average Word Length by Sentiment:")
-print(avg_word_length_by_sentiment)
-
-# Visualize
-avg_word_length_by_sentiment.plot(kind='bar', color=['orange', 'blue'], figsize=(6, 4))
-plt.title("Average Word Length by Sentiment")
-plt.xlabel("Sentiment")
-plt.ylabel("Average Word Length")
-plt.xticks(rotation=0)
-plt.show()
-
-from sklearn.feature_extraction.text import CountVectorizer
-
-# Define a function to extract n-grams
-def get_top_ngrams(corpus, n=None, ngram_range=(2, 2)):
-    vectorizer = CountVectorizer(ngram_range=ngram_range, max_features=n)
-    X = vectorizer.fit_transform(corpus)
-    return vectorizer.get_feature_names_out()
-
-# Top bigrams for positive reviews
-positive_bigrams = get_top_ngrams(df[df['sentiment'] == 'positive']['review'], n=10)
-print("Top Positive Bigrams:", positive_bigrams)
-
-# Top bigrams for negative reviews
-negative_bigrams = get_top_ngrams(df[df['sentiment'] == 'negative']['review'], n=10)
-print("Top Negative Bigrams:", negative_bigrams)
-
-# Detect outliers in review length
-q1 = df['review_length'].quantile(0.25)
-q3 = df['review_length'].quantile(0.75)
-iqr = q3 - q1
-lower_bound = q1 - 1.5 * iqr
-upper_bound = q3 + 1.5 * iqr
-
-# Outliers
-outliers = df[(df['review_length'] < lower_bound) | (df['review_length'] > upper_bound)]
-print("Number of Outliers in Review Length:", len(outliers))
-
-# Visualize outliers
-plt.figure(figsize=(8, 6))
-sns.boxplot(x='sentiment', y='review_length', data=df, palette='Set3')
-plt.title("Review Length Outliers by Sentiment")
-plt.xlabel("Sentiment")
-plt.ylabel("Review Length")
-plt.show()
 
